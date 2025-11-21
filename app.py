@@ -49,12 +49,15 @@ def procesar_depositos(archivo):
 
     # Detectar columna 'beneficiario'
     usuario_col = next((col for col in df.columns if col.strip().lower() == 'beneficiario'), None)
+    
+    # Detectar columna 'pagador'
+    pagador_col = next((col for col in df.columns if col.strip().lower() == 'pagador'), None)
 
     # Detectar columna 'id pagador' (user ID)
     id_pagador_col = next((col for col in df.columns if col.strip().lower() == 'id pagador'), None)
 
-    if not usuario_col or not id_pagador_col or 'CANTIDAD' not in df.columns or 'FECHA' not in df.columns or 'ESTADO DEL PAGO' not in df.columns:
-        st.warning("⚠️ Faltan columnas necesarias: 'beneficiario', 'ID PAGADOR', 'CANTIDAD', 'FECHA' o 'ESTADO DEL PAGO'.")
+    if not usuario_col or not pagador_col or not id_pagador_col or 'CANTIDAD' not in df.columns or 'FECHA' not in df.columns or 'ESTADO DEL PAGO' not in df.columns:
+        st.warning("⚠️ Faltan columnas necesarias: 'beneficiario', 'pagador', 'ID PAGADOR', 'CANTIDAD', 'FECHA' o 'ESTADO DEL PAGO'.")
         return None
 
     # Filtrar pagos confirmados
@@ -68,12 +71,28 @@ def procesar_depositos(archivo):
     df["FECHA"] = pd.to_datetime(df["FECHA"], errors="coerce")
     df["hora"] = df["FECHA"].dt.hour
 
-    # Tomamos el primer ID PAGADOR por usuario
-    df_ids = df[[usuario_col, id_pagador_col]].drop_duplicates().dropna()
-    df_ids = df_ids.rename(columns={usuario_col: "usuario", id_pagador_col: "user_id"})
+    # Validar que pagador == beneficiario y asignar user_id o "revisar ID"
+    df["pagador_equals_beneficiario"] = df[pagador_col].astype(str).str.strip() == df[usuario_col].astype(str).str.strip()
+    
+    # Crear columna de user_id con validación
+    df["user_id_temp"] = df.apply(
+        lambda row: pd.to_numeric(row[id_pagador_col], errors="coerce") if row["pagador_equals_beneficiario"] else "revisar ID",
+        axis=1
+    )
 
-    # Asegurar que user_id sea numérico sin separadores de miles
-    df_ids["user_id"] = pd.to_numeric(df_ids["user_id"], errors="coerce").fillna(0).astype(int)
+    # Tomar el primer user_id por usuario (si todos coinciden, tomará el correcto; si hay "revisar ID", lo marcará)
+    df_ids = df[[usuario_col, "user_id_temp"]].drop_duplicates().dropna()
+    df_ids = df_ids.rename(columns={usuario_col: "usuario", "user_id_temp": "user_id"})
+    
+    # Si hay múltiples valores de user_id para un mismo usuario, marcar como "revisar ID"
+    user_id_counts = df_ids.groupby("usuario")["user_id"].nunique()
+    usuarios_conflictivos = user_id_counts[user_id_counts > 1].index.tolist()
+    
+    for usuario in usuarios_conflictivos:
+        df_ids.loc[df_ids["usuario"] == usuario, "user_id"] = "revisar ID"
+    
+    # Eliminar duplicados, manteniendo la última fila por usuario
+    df_ids = df_ids.drop_duplicates(subset=["usuario"], keep="last")
 
     resumen = df.groupby(usuario_col).agg(
         deposito_total=("CANTIDAD", "sum"),
@@ -81,7 +100,7 @@ def procesar_depositos(archivo):
         deposito_minimo=("CANTIDAD", "min")
     ).reset_index().rename(columns={usuario_col: "usuario"})
 
-    # Agregar ID PAGADOR
+    # Agregar ID PAGADOR con validación
     resumen = resumen.merge(df_ids, on="usuario", how="left")
 
     # Agregar depósito máximo entre 17 y 23 hs
@@ -91,6 +110,7 @@ def procesar_depositos(archivo):
     resumen = resumen.merge(max_17_23, on="usuario", how="left")
 
     return resumen
+
 
 # === PROCESAMIENTO ===
 if archivo_jugado and archivo_depositos:
